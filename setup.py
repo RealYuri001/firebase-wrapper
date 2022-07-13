@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='Firebase',
-    version='3.0.27',
+    version='3.0.28',
     url='https://github.com/HF1016/firebase-wrapper',
     description='A simple python wrapper for the Firebase API',
     author='HF1016',
