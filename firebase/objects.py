@@ -1,36 +1,40 @@
+from __future__ import annotations
+
+import asyncio
 import json
-import time
 import math
 import socket
-import requests
 import datetime
+import time
 import threading
+from typing import Any, Union, Optional, TypeVar
 
 import python_jwt as jwt
 
 from gcloud import storage
 from random import uniform
-from requests import Session
 from sseclient import SSEClient
 from Crypto.PublicKey import RSA
 from collections import OrderedDict
 from urllib.parse import urlencode, quote
-from requests.exceptions import HTTPError
-from requests_toolbelt.adapters import appengine
 from oauth2client.service_account import ServiceAccountCredentials
-from requests.packages.urllib3.contrib.appengine import is_appengine_sandbox
+from aiohttp import ClientResponse, ClientSession, ClientResponseError
 
+from .exceptions import *
 
+KT = TypeVar('KT')
+VT = TypeVar('VT')
 
-class Firebase(object):
-    """ Firebase Interface """
-    def __init__(self, config):
-        self.api_key = config["apiKey"]
-        self.auth_domain = config["authDomain"]
-        self.database_url = config["databaseURL"]
-        self.storage_bucket = config["storageBucket"]
+class Firebase: #basicly done
+    """ Firebase Interface."""
+    def __init__(self, config: dict):
+        self.api_key: str = config["apiKey"]
+        self.auth_domain: str = config["authDomain"]
+        self.database_url: str = config["databaseURL"]
+        
+        self.storage_bucket: str = config["storageBucket"]
         self.credentials = None
-        self.requests = requests.Session()
+        self.requests = ClientSession #are you sure? this required a header. hmm maybe idk
 
         if config.get("serviceAccount"):
             scopes = [
@@ -39,47 +43,38 @@ class Firebase(object):
                 "https://www.googleapis.com/auth/cloud-platform"
             ]
 
-            service_account_type = type(config["serviceAccount"])
+            service_account_type: Union[dict, str] = config.get("serviceAccount")
 
-            if service_account_type is str:
+            if isinstance(service_account_type, str):
                 self.credentials = ServiceAccountCredentials.from_json_keyfile_name(config["serviceAccount"], scopes)
 
-            if service_account_type is dict:
+            if isinstance(service_account_type, dict):
                 self.credentials = ServiceAccountCredentials.from_json_keyfile_dict(config["serviceAccount"], scopes)
 
-        if is_appengine_sandbox():
-            adapter = appengine.AppEngineAdapter(max_retries=3)
-        else:
-            adapter = requests.adapters.HTTPAdapter(max_retries=3)
-
-        for scheme in ('http://', 'https://'):
-            self.requests.mount(scheme, adapter)
-
-    def auth(self):
+    def auth(self) -> Auth:
         return Auth(self.api_key, self.requests, self.credentials)
 
-    def database(self):
+    def database(self) -> Database:
         return Database(self.credentials, self.api_key, self.database_url, self.requests)
 
-    def storage(self):
+    def storage(self) -> Storage:
         return Storage(self.credentials, self.storage_bucket, self.requests)
 
-
-class Auth:
+class Auth: #ignore this for now
     """ Authentication Service """
-    def __init__(self, api_key, requests_session, credentials):
+    def __init__(self, api_key: str, requests_session: ClientSession, credentials: ServiceAccountCredentials):
         self.api_key = api_key
         self.current_user = None
-        self.requests = requests_session
-        self.credentials = credentials
+        self.requests: ClientSession = requests_session
+        self.credentials: ServiceAccountCredentials = credentials
 
-    def sign_in_with_email_and_password(self, email, password):
-        request_object = self._extracted_from_create_user_with_email_and_password_2('https://www.googleapis.com/identitytoolkit/v3/relyingparty/verifyPassword?key=', email, password)
+    async def sign_in_with_email_and_password(self, email: str, password: str):
+        request_object = await self._create_user_with_email_and_password_2('https://www.googleapis.com/identitytoolkit/v3/relyingparty/verifyPassword?key=', email, password)
 
-        self.current_user = request_object.json()
+        self.current_user = await request_object.json()
         return self.current_user
 
-    def create_custom_token(self, uid, additional_claims=None):
+    def create_custom_token(self, uid: str, additional_claims=None) -> str | None:
         service_account_email = self.credentials.service_account_email
         private_key = RSA.importKey(self.credentials._private_key_pkcs8_pem)
 
@@ -96,83 +91,90 @@ class Auth:
         exp = datetime.timedelta(minutes=60)
         return jwt.generate_jwt(payload, private_key, "RS256", exp)
 
-    def sign_in_with_custom_token(self, token):
+    async def sign_in_with_custom_token(self, token: str):
         request_ref = f"https://www.googleapis.com/identitytoolkit/v3/relyingparty/verifyCustomToken?key={self.api_key}"
 
         headers = {"content-type": "application/json; charset=UTF-8"}
         data = json.dumps({"returnSecureToken": True, "token": token})
-        request_object = requests.post(request_ref, headers=headers, data=data)
-        raise_detailed_error(request_object)
-        return request_object.json()
+        request_object = await self.requests.post(request_ref, headers=headers, data=data)
+        await raise_detailed_error(request_object)
+        return await request_object.json()
 
-    def refresh(self, refresh_token):
+    async def refresh(self, refresh_token: str) -> dict:
         request_ref = f"https://securetoken.googleapis.com/v1/token?key={self.api_key}"
         headers = {"content-type": "application/json; charset=UTF-8"}
         data = json.dumps({"grantType": "refresh_token", "refreshToken": refresh_token})
-        request_object = requests.post(request_ref, headers=headers, data=data)
-        raise_detailed_error(request_object)
-        request_object_json = request_object.json()
+        request_object = await self.requests.post(request_ref, headers=headers, data=data)
+        await raise_detailed_error(request_object)
+        request_object_json = await request_object.json()
         return {
             "userId": request_object_json["user_id"],
             "idToken": request_object_json["id_token"],
             "refreshToken": request_object_json["refresh_token"]
         }
 
-    def get_account_info(self, id_token):
+    async def get_account_info(self, id_token):
         request_ref = f"https://www.googleapis.com/identitytoolkit/v3/relyingparty/getAccountInfo?key={self.api_key}"
 
         headers = {"content-type": "application/json; charset=UTF-8"}
         data = json.dumps({"idToken": id_token})
-        request_object = requests.post(request_ref, headers=headers, data=data)
-        raise_detailed_error(request_object)
-        return request_object.json()
+        request_object = await self.requests.post(request_ref, headers=headers, data=data)
+        await raise_detailed_error(request_object)
+        return await request_object.json()
 
-    def send_email_verification(self, id_token):
+    async def send_email_verification(self, id_token):
         request_ref = f"https://www.googleapis.com/identitytoolkit/v3/relyingparty/getOobConfirmationCode?key={self.api_key}"
 
         headers = {"content-type": "application/json; charset=UTF-8"}
         data = json.dumps({"requestType": "VERIFY_EMAIL", "idToken": id_token})
-        request_object = requests.post(request_ref, headers=headers, data=data)
-        raise_detailed_error(request_object)
-        return request_object.json()
+        request_object = await self.requests.post(request_ref, headers=headers, data=data)
+        await raise_detailed_error(request_object)
+        return await request_object.json()
 
-    def send_password_reset_email(self, email):
+    async def send_password_reset_email(self, email: str):
         request_ref = f"https://www.googleapis.com/identitytoolkit/v3/relyingparty/getOobConfirmationCode?key={self.api_key}"
 
         headers = {"content-type": "application/json; charset=UTF-8"}
         data = json.dumps({"requestType": "PASSWORD_RESET", "email": email})
-        request_object = requests.post(request_ref, headers=headers, data=data)
-        raise_detailed_error(request_object)
-        return request_object.json()
+        request_object = await self.requests.post(request_ref, headers=headers, data=data)
+        await raise_detailed_error(request_object)
+        return await request_object.json()
 
-    def verify_password_reset_code(self, reset_code, new_password):
+    async def verify_password_reset_code(self, reset_code, new_password):
         request_ref = f"https://www.googleapis.com/identitytoolkit/v3/relyingparty/resetPassword?key={self.api_key}"
 
         headers = {"content-type": "application/json; charset=UTF-8"}
         data = json.dumps({"oobCode": reset_code, "newPassword": new_password})
-        request_object = requests.post(request_ref, headers=headers, data=data)
-        raise_detailed_error(request_object)
-        return request_object.json()
+        request_object = await self.requests.post(request_ref, headers=headers, data=data)
+        await raise_detailed_error(request_object)
+        return await request_object.json()
 
-    def create_user_with_email_and_password(self, email, password):
-        request_object = self._extracted_from_create_user_with_email_and_password_2('https://www.googleapis.com/identitytoolkit/v3/relyingparty/signupNewUser?key=', email, password)
+    async def create_user_with_email_and_password(self, email, password):
+        request_object = await self._create_user_with_email_and_password_2(
+            'https://www.googleapis.com/identitytoolkit/v3/relyingparty/signupNewUser?key=', email, password
+        )
 
-        return request_object.json()
+        return await request_object.json()
 
-    # TODO Rename this here and in `sign_in_with_email_and_password` and `create_user_with_email_and_password`
-    def _extracted_from_create_user_with_email_and_password_2(self, arg0, email, password):
+    async def _create_user_with_email_and_password_2(self, arg0, email: str, password: str) -> ClientResponse: #tf
         request_ref = f"{arg0}{self.api_key}"
         headers = {"content-type": "application/json; charset=UTF-8"}
         data = json.dumps({"email": email, "password": password, "returnSecureToken": True})
 
-        result = requests.post(request_ref, headers=headers, data=data)
-        raise_detailed_error(result)
+        result = await self.requests.post(request_ref, headers=headers, data=data)
+        await raise_detailed_error(result)
         return result
 
 
-class Database:
+class Database: #WIP
     """ Database Service """
-    def __init__(self, credentials, api_key, database_url, requests_session):
+    def __init__(
+        self, 
+        credentials: ServiceAccountCredentials, 
+        api_key: str, 
+        database_url: str, 
+        requests_session: ClientSession
+    ):
     
         url = database_url if database_url.endswith('/') else ''.join([database_url, '/'])
 
@@ -182,86 +184,91 @@ class Database:
         self.requests = requests_session
 
         self.path = ""
-        self.build_query = {}
+        self.build_query: str = {}
         self.last_push_time = 0
-        self.last_rand_chars = []
+        self.last_rand_chars: list = []
 
-    def order_by_key(self):
+    def order_by_key(self) -> Database:
         self.build_query["orderBy"] = "$key"
         return self
 
-    def order_by_value(self):
+    def order_by_value(self) -> Database:
         self.build_query["orderBy"] = "$value"
         return self
 
-    def order_by_child(self, order):
+    def order_by_child(self, order) -> Database:
         self.build_query["orderBy"] = order
         return self
 
-    def start_at(self, start):
+    def start_at(self, start) -> Database:
         self.build_query["startAt"] = start
         return self
 
-    def end_at(self, end):
+    def end_at(self, end) -> Database:
         self.build_query["endAt"] = end
         return self
 
-    def equal_to(self, equal):
+    def equal_to(self, equal) -> Database:
         self.build_query["equalTo"] = equal
         return self
 
-    def limit_to_first(self, limit_first):
+    def limit_to_first(self, limit_first) -> Database:
         self.build_query["limitToFirst"] = limit_first
         return self
 
-    def limit_to_last(self, limit_last):
+    def limit_to_last(self, limit_last) -> Database:
         self.build_query["limitToLast"] = limit_last
         return self
 
-    def shallow(self):
+    def shallow(self) -> Database:
         self.build_query["shallow"] = True
         return self
 
-    def child(self, *args):
-        new_path = "/".join([str(arg) for arg in args])
-        if self.path:
-            self.path += f"/{new_path}"
-        else:
-            new_path = new_path.removeprefix("/")
-            self.path = new_path
-        return self
-
-    def build_request_url(self, token):
+    def child(self, *args) -> Database:
+        path = "/".join([str(arg) for arg in args])
+        new_path = self.path+path
+        db = Database(self.credentials, self.api_key, self.database_url, self.requests)
+        db.path = new_path
+        db.build_query = self.build_query
+        return db
+    
+    def build_request_url(self, token: str) -> str:
         parameters = {}
         if token:
             parameters['auth'] = token
+        
         for param in list(self.build_query):
-            if type(self.build_query[param]) is str:
+            
+            if isinstance(self.build_query[param], str):
                 parameters[param] = quote('"' + self.build_query[param] + '"')
-            elif type(self.build_query[param]) is bool:
+            
+            elif isinstance(self.build_query[param], bool):
                 parameters[param] = "true" if self.build_query[param] else "false"
+            
             else:
                 parameters[param] = self.build_query[param]
-        request_ref = '{0}{1}.json?{2}'.format(self.database_url, self.path, urlencode(parameters))
+        request_ref = f'{self.database_url}{self.path}.json?{urlencode(parameters)}'
         self.path = ""
         self.build_query = {}
         return request_ref
 
-    def build_headers(self, token=None):
+    def build_headers(self, token: str = None) -> dict[str, str]:
         headers = {"content-type": "application/json; charset=UTF-8"}
         if not token and self.credentials:
             access_token = self.credentials.get_access_token().access_token
             headers['Authorization'] = f'Bearer {access_token}'
         return headers
 
-    def get(self, token=None, json_kwargs={}):
+    async def get(self, token: str = None, json_kwargs: dict = None) -> FirebaseResponse:
         build_query = self.build_query
+        
         query_key = self.path.split("/")[-1]
         request_ref = self.build_request_url(token)
         headers = self.build_headers(token)
-        request_object = self.requests.get(request_ref, headers=headers)
-        raise_detailed_error(request_object)
-        request_dict = request_object.json(**json_kwargs)
+        
+        request_object = await self.requests.get(request_ref, headers=headers)
+        await raise_detailed_error(request_object)
+        request_dict = await request_object.json(**json_kwargs)
 
         if isinstance(request_dict, list):
             return FirebaseResponse(convert_list_to_firebase(request_dict), query_key)
@@ -284,58 +291,56 @@ class Database:
                 sorted_response = sorted(request_dict.items(), key=lambda item: item[1])
             else:
                 sorted_response = sorted(request_dict.items(), key=lambda item: item[1][build_query["orderBy"]])
+        
         return FirebaseResponse(convert_to_firebase(sorted_response), query_key)
 
-    def push(self, data, token=None, json_kwargs={}):
+    async def push(self, data, token: str = None, json_kwargs: dict = None) -> FirebaseResponse:
         request_ref = self.check_token(self.database_url, self.path, token)
         self.path = ""
         headers = self.build_headers(token)
-        request_object = self.requests.post(
+        request_object = await self.requests.post(
             request_ref, headers=headers, data=json.dumps(data, **json_kwargs).encode("utf-8")
         )
-        raise_detailed_error(request_object)
-        return request_object.json()
+        await raise_detailed_error(request_object)
+        return await request_object.json()
 
-    def set(self, data, token=None, json_kwargs={}):
+    async def set(self, data, token: str =None, json_kwargs: dict =None) -> FirebaseResponse:
         request_ref = self.check_token(self.database_url, self.path, token)
         self.path = ""
         headers = self.build_headers(token)
-        request_object = self.requests.put(
+        request_object = await self.requests.put(
             request_ref, headers=headers, data=json.dumps(data, **json_kwargs).encode("utf-8")
         )
-        raise_detailed_error(request_object)
-        return request_object.json()
+        await raise_detailed_error(request_object)
+        return await request_object.json()
 
-    def update(self, data, token=None, json_kwargs={}):
+    async def update(self, data, token: str =None, json_kwargs: dict = None) :
         request_ref = self.check_token(self.database_url, self.path, token)
         self.path = ""
         headers = self.build_headers(token)
-        request_object = self.requests.patch(
+        request_object = await self.requests.patch(
             request_ref, headers=headers, data=json.dumps(data, **json_kwargs).encode("utf-8")
         )
-        raise_detailed_error(request_object)
-        return request_object.json()
+        await raise_detailed_error(request_object)
+        return await request_object.json()
 
-    def remove(self, token=None):
+    async def remove(self, token: str = None):
         request_ref = self.check_token(self.database_url, self.path, token)
         self.path = ""
         headers = self.build_headers(token)
-        request_object = self.requests.delete(request_ref, headers=headers)
-        raise_detailed_error(request_object)
-        return request_object.json()
+        request_object = await self.requests.delete(request_ref, headers=headers)
+        await raise_detailed_error(request_object)
+        return await request_object.json()
 
-    def stream(self, stream_handler, token=None, stream_id=None):
+    def stream(self, stream_handler, token: str =None, stream_id=None) -> Stream:
         request_ref = self.build_request_url(token)
         return Stream(request_ref, stream_handler, self.build_headers, stream_id)
 
     @staticmethod
-    def check_token(database_url, path, token):
-        if token:
-            return '{0}{1}.json?auth={2}'.format(database_url, path, token)
-        else:
-            return '{0}{1}.json'.format(database_url, path)
+    def check_token(database_url: str, path: str, token: str) -> str:
+        return f'{database_url}{path}.json?auth={token}' if token else f'{database_url}{path}.json'
 
-    def generate_key(self):
+    def generate_key(self) -> str:
         push_chars = '-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz'
         now = int(time.time() * 1000)
         duplicate_time = now == self.last_push_time
@@ -362,7 +367,7 @@ class Database:
         return new_id
 
     @staticmethod
-    def sort(origin, by_key):
+    def sort(origin, by_key) -> FirebaseResponse:
         firebases = origin.each()
         new_list = [firebase.item for firebase in firebases]
 
@@ -370,9 +375,9 @@ class Database:
         return FirebaseResponse(convert_to_firebase(data), origin.key())
 
 
-class Storage:
+class Storage: #ignore this for now
     """ Storage Service """
-    def __init__(self, credentials, storage_bucket, requests):
+    def __init__(self, credentials: ServiceAccountCredentials, storage_bucket, requests: ClientSession):
         self.storage_bucket = f"https://firebasestorage.googleapis.com/v0/b/{storage_bucket}"
 
         self.credentials = credentials
@@ -383,7 +388,7 @@ class Storage:
             client = storage.Client(credentials=credentials, project=storage_bucket)
             self.bucket = client.get_bucket(storage_bucket)
 
-    def child(self, *args):
+    def child(self, *args) -> Storage:
         new_path = "/".join(args)
         if self.path:
             self.path += f"/{new_path}"
@@ -392,7 +397,7 @@ class Storage:
             self.path = new_path
         return self
 
-    def put(self, file, token=None):
+    async def put(self, file, token: str =None):
         path = self.path
         self.path = None
 
@@ -401,24 +406,26 @@ class Storage:
 
         if token:
             headers = {"Authorization": f"Firebase {token}"}
-            request_object = self.requests.post(request_ref, headers=headers, data=file_object)
-            raise_detailed_error(request_object)
-            return request_object.json()
+            request_object = await self.requests.post(request_ref, headers=headers, data=file_object)
+            await raise_detailed_error(request_object)
+            return await request_object.json()
+        
         elif self.credentials:
             blob = self.bucket.blob(path)
             if isinstance(file, str):
                 return blob.upload_from_filename(filename=file)
             else:
                 return blob.upload_from_file(file_obj=file)
+        
         else:
-            request_object = self.requests.post(request_ref, data=file_object)
-            raise_detailed_error(request_object)
-            return request_object.json()
+            request_object = await self.requests.post(request_ref, data=file_object)
+            await raise_detailed_error(request_object)
+            return await request_object.json()
 
-    def delete(self, name):
+    def delete(self, name) -> None:
         self.bucket.delete_blob(name)
 
-    def download(self, filename, token=None):
+    async def download(self, filename, token: str =None):
         path = self.path
         url = self.get_url(token)
         self.path = None
@@ -429,14 +436,19 @@ class Storage:
         if self.credentials:
             blob = self.bucket.get_blob(path)
             blob.download_to_filename(filename)
+        
         else:
-            r = requests.get(url, stream=True)
-            if r.status_code == 200:
-                with open(filename, 'wb') as f:
-                    for chunk in r:
-                        f.write(chunk)
+            r = await ClientSession().get(url, stream=True)
+            if r.status >= 200 and r.status <= 499:
+                raise HTTPExceptionError(
+                    f'HTTP error encountered while downloading file. Status: {r.status}'
+                )
+            
+            with open(filename, 'wb') as f:
+                for chunk in r:
+                    f.write(chunk)
 
-    def get_url(self, token):
+    def get_url(self, token: str) -> str:
         path = self.path
         self.path = None
 
@@ -444,19 +456,20 @@ class Storage:
             path = path[1:]
 
         if token:
-            return "{0}/o/{1}?alt=media&token={2}".format(self.storage_bucket, quote(path, safe=''), token)
+            return f"{self.storage_bucket}/o/{quote(path, safe='')}?alt=media&token={token}"
 
-        return "{0}/o/{1}?alt=media".format(self.storage_bucket, quote(path, safe=''))
+        return f"{self.storage_bucket}/o/{quote(path, safe='')}?alt=media"
 
     def list_files(self):
         return self.bucket.list_blobs()
 
 
-def raise_detailed_error(request_object):
+async def raise_detailed_error(request_object: ClientResponse):
     try:
         request_object.raise_for_status()
-    except HTTPError as e:
-        raise HTTPError(e, request_object.text)
+    
+    except ClientResponseError as e:
+        raise ClientResponseError(e, await request_object.text) from e
 
 
 def convert_to_firebase(items):
@@ -468,11 +481,11 @@ def convert_list_to_firebase(items):
 
 
 class FirebaseResponse:
-    def __init__(self, firebases, query_key):
+    def __init__(self, firebases: FirebaseKeyValue, query_key):
         self.firebases = firebases
         self.query_key = query_key
 
-    def val(self):
+    def val(self) -> Union[FirebaseKeyValue, OrderedDict[list]]:
         if not isinstance(self.firebases, list):
             return self.firebases
         firebase_list = []
@@ -484,17 +497,16 @@ class FirebaseResponse:
         firebase_list.extend((firebase.key(), firebase.val()) for firebase in self.firebases)
 
         return OrderedDict(firebase_list)
-
-    def key(self):
+    
+    def key(self) -> str:
         return self.query_key
 
-    def each(self):
+    def each(self) -> Optional[list]:
         if isinstance(self.firebases, list):
             return self.firebases
 
-
 class FirebaseKeyValue:
-    def __init__(self, item):
+    def __init__(self, item: list):
         self.item = item
 
     def val(self):
@@ -504,7 +516,7 @@ class FirebaseKeyValue:
         return self.item[0]
 
 
-class KeepAuthSession(Session):
+class KeepAuthSession(ClientSession):
     """
     A session that doesn't drop Authentication on redirects between domains.
     """
@@ -548,7 +560,7 @@ class Stream:
         """
         return KeepAuthSession()
 
-    def start(self):
+    def start(self) -> Stream:
         self.thread = threading.Thread(target=self.start_stream)
         self.thread.start()
         return self
@@ -563,9 +575,9 @@ class Stream:
                     msg_data["stream_id"] = self.stream_id
                 self.stream_handler(msg_data)
 
-    def close(self):
+    async def close(self) -> Stream:
         while not self.sse and not hasattr(self.sse, 'resp'):
-            time.sleep(0.001)
+            await asyncio.sleep(0.001)
         self.sse.running = False
         self.sse.close()
         self.thread.join()
