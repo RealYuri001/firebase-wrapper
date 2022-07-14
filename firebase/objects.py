@@ -7,7 +7,7 @@ import socket
 import datetime
 import time
 import threading
-from typing import Any, Union, Optional, TypeVar
+from typing import Union, Optional
 
 import python_jwt as jwt
 
@@ -20,21 +20,18 @@ from urllib.parse import urlencode, quote
 from oauth2client.service_account import ServiceAccountCredentials
 from aiohttp import ClientResponse, ClientSession, ClientResponseError
 
-from .exceptions import *
-
-KT = TypeVar('KT')
-VT = TypeVar('VT')
+from firebase.exceptions import HTTPExceptionError
 
 class Firebase: #basicly done
     """ Firebase Interface."""
     def __init__(self, config: dict):
-        self.api_key: str = config["apiKey"]
-        self.auth_domain: str = config["authDomain"]
-        self.database_url: str = config["databaseURL"]
+        self.api_key: str = config.get("apiKey")
+        self.auth_domain: str = config.get("authDomain")
+        self.database_url: str = config.get("databaseURL")
         
-        self.storage_bucket: str = config["storageBucket"]
+        self.storage_bucket: str = config.get("storageBucket")
         self.credentials = None
-        self.requests = ClientSession #are you sure? this required a header. hmm maybe idk
+        self.requests: ClientSession = ClientSession #are you sure? this required a header. hmm maybe idk
 
         if config.get("serviceAccount"):
             scopes = [
@@ -69,12 +66,14 @@ class Auth: #ignore this for now
         self.credentials: ServiceAccountCredentials = credentials
 
     async def sign_in_with_email_and_password(self, email: str, password: str):
-        request_object = await self._create_user_with_email_and_password_2('https://www.googleapis.com/identitytoolkit/v3/relyingparty/verifyPassword?key=', email, password)
+        request_object = await self._create_user_with_email_and_password_2(
+            'https://www.googleapis.com/identitytoolkit/v3/relyingparty/verifyPassword?key=', email, password
+        )
 
         self.current_user = await request_object.json()
         return self.current_user
 
-    def create_custom_token(self, uid: str, additional_claims=None) -> str | None:
+    def create_custom_token(self, uid: str, additional_claims = None):
         service_account_email = self.credentials.service_account_email
         private_key = RSA.importKey(self.credentials._private_key_pkcs8_pem)
 
@@ -107,6 +106,7 @@ class Auth: #ignore this for now
         request_object = await self.requests.post(request_ref, headers=headers, data=data)
         await raise_detailed_error(request_object)
         request_object_json = await request_object.json()
+        
         return {
             "userId": request_object_json["user_id"],
             "idToken": request_object_json["id_token"],
@@ -247,9 +247,11 @@ class Database: #WIP
             
             else:
                 parameters[param] = self.build_query[param]
+        
         request_ref = f'{self.database_url}{self.path}.json?{urlencode(parameters)}'
         self.path = ""
         self.build_query = {}
+        
         return request_ref
 
     def build_headers(self, token: str = None) -> dict[str, str]:
@@ -257,6 +259,7 @@ class Database: #WIP
         if not token and self.credentials:
             access_token = self.credentials.get_access_token().access_token
             headers['Authorization'] = f'Bearer {access_token}'
+        
         return headers
 
     async def get(self, token: str = None, json_kwargs: dict = None) -> FirebaseResponse:
@@ -266,7 +269,7 @@ class Database: #WIP
         request_ref = self.build_request_url(token)
         headers = self.build_headers(token)
         
-        request_object = await self.requests.get(request_ref, headers=headers)
+        request_object = await aiohttp.ClientSession(headers=headers).get(request_ref)
         await raise_detailed_error(request_object)
         request_dict = await request_object.json(**json_kwargs)
 
@@ -472,20 +475,20 @@ async def raise_detailed_error(request_object: ClientResponse):
         raise ClientResponseError(e, await request_object.text) from e
 
 
-def convert_to_firebase(items):
+def convert_to_firebase(items) -> list[FirebaseKeyValue]:
     return [FirebaseKeyValue(item) for item in items]
 
 
-def convert_list_to_firebase(items):
+def convert_list_to_firebase(items) -> list[FirebaseKeyValue]:
     return [FirebaseKeyValue([items.index(item), item]) for item in items]
 
 
 class FirebaseResponse:
-    def __init__(self, firebases: FirebaseKeyValue, query_key):
+    def __init__(self, firebases, query_key):
         self.firebases = firebases
         self.query_key = query_key
 
-    def val(self) -> Union[FirebaseKeyValue, OrderedDict[list]]:
+    def val(self):
         if not isinstance(self.firebases, list):
             return self.firebases
         firebase_list = []
@@ -581,4 +584,5 @@ class Stream:
         self.sse.running = False
         self.sse.close()
         self.thread.join()
+        
         return self
