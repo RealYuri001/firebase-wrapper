@@ -269,7 +269,7 @@ class Database: #WIP
         request_ref = self.build_request_url(token)
         headers = self.build_headers(token)
         
-        request_object = await aiohttp.ClientSession(headers=headers).get(request_ref)
+        request_object = await ClientSession(headers=headers).get(request_ref)
         await raise_detailed_error(request_object)
         request_dict = await request_object.json(**json_kwargs)
 
